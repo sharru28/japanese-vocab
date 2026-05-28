@@ -5,22 +5,47 @@ function shuffle(arr) {
   return [...arr].sort(() => Math.random() - 0.5)
 }
 
+// 優先順序：null(未標記) → 0(完全想不起來) → 1(有點印象) → 2(我很會了)
+function sortByFamiliarity(words, progressMap) {
+  const priority = (word) => {
+    const p = progressMap[word.id]
+    if (!p || p.familiarity === null || p.familiarity === undefined) return 0
+    return p.familiarity + 1
+  }
+  const groups = [[], [], [], []]
+  words.forEach(w => groups[priority(w)].push(w))
+  return [...shuffle(groups[0]), ...shuffle(groups[1]), ...shuffle(groups[2]), ...shuffle(groups[3])]
+}
+
+const LABELS = [
+  { value: 0, text: '完全想不起來', color: '#ef4444' },
+  { value: 1, text: '有點印象', color: '#f59e0b' },
+  { value: 2, text: '我很會了', color: '#22c55e' },
+]
+
 export default function FlashCard({ user, onBack }) {
   const [words, setWords] = useState([])
   const [queue, setQueue] = useState([])
   const [idx, setIdx] = useState(0)
   const [flipped, setFlipped] = useState(false)
-  const [sessionResult, setSessionResult] = useState(null)
-  const [correct, setCorrect] = useState(0)
-  const [wrong, setWrong] = useState(0)
+  const [done, setDone] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
     const load = async () => {
-      const { data } = await supabase.from('words').select('*')
-      if (!data || data.length === 0) { setLoading(false); return }
-      setWords(data)
-      setQueue(shuffle(data))
+      const { data: wordsData } = await supabase.from('words').select('*')
+      if (!wordsData || wordsData.length === 0) { setLoading(false); return }
+
+      const { data: progressData } = await supabase
+        .from('user_progress')
+        .select('word_id, familiarity')
+        .eq('user_name', user)
+
+      const progressMap = {}
+      if (progressData) progressData.forEach(p => { progressMap[p.word_id] = p })
+
+      setWords(wordsData)
+      setQueue(sortByFamiliarity(wordsData, progressMap))
       setLoading(false)
     }
     load()
@@ -28,50 +53,47 @@ export default function FlashCard({ user, onBack }) {
 
   const current = queue[idx]
 
-  const recordProgress = async (wordId, isCorrect) => {
+  const handleMark = async (value) => {
     const { data: existing } = await supabase
       .from('user_progress')
-      .select('id, correct_count, wrong_count')
+      .select('id')
       .eq('user_name', user)
-      .eq('word_id', wordId)
+      .eq('word_id', current.id)
       .single()
 
     if (existing) {
-      await supabase.from('user_progress').update({
-        correct_count: existing.correct_count + (isCorrect ? 1 : 0),
-        wrong_count: existing.wrong_count + (isCorrect ? 0 : 1),
-        last_reviewed: new Date().toISOString(),
-      }).eq('id', existing.id)
+      await supabase.from('user_progress')
+        .update({ familiarity: value, last_reviewed: new Date().toISOString() })
+        .eq('id', existing.id)
     } else {
       await supabase.from('user_progress').insert({
         user_name: user,
-        word_id: wordId,
-        correct_count: isCorrect ? 1 : 0,
-        wrong_count: isCorrect ? 0 : 1,
+        word_id: current.id,
+        familiarity: value,
+        correct_count: 0,
+        wrong_count: 0,
       })
     }
-  }
-
-  const handleAnswer = async (isCorrect) => {
-    await recordProgress(current.id, isCorrect)
-    if (isCorrect) setCorrect(c => c + 1)
-    else setWrong(w => w + 1)
 
     if (idx + 1 >= queue.length) {
-      setSessionResult({ correct: correct + (isCorrect ? 1 : 0), wrong: wrong + (isCorrect ? 0 : 1), total: queue.length })
+      setDone(true)
     } else {
       setIdx(i => i + 1)
       setFlipped(false)
     }
   }
 
-  const restart = () => {
-    setQueue(shuffle(words))
+  const restart = async () => {
+    const { data: progressData } = await supabase
+      .from('user_progress')
+      .select('word_id, familiarity')
+      .eq('user_name', user)
+    const progressMap = {}
+    if (progressData) progressData.forEach(p => { progressMap[p.word_id] = p })
+    setQueue(sortByFamiliarity(words, progressMap))
     setIdx(0)
     setFlipped(false)
-    setCorrect(0)
-    setWrong(0)
-    setSessionResult(null)
+    setDone(false)
   }
 
   if (loading) return (
@@ -88,21 +110,15 @@ export default function FlashCard({ user, onBack }) {
     </div>
   )
 
-  if (sessionResult) return (
+  if (done) return (
     <div>
-      <div className="page-header"><button className="back-btn" onClick={onBack}>←</button><h2>本次結果</h2></div>
+      <div className="page-header"><button className="back-btn" onClick={onBack}>←</button><h2>翻卡片</h2></div>
       <div style={{ padding: '40px 24px', textAlign: 'center' }}>
-        <div style={{ fontSize: 64, marginBottom: 16 }}>
-          {sessionResult.correct / sessionResult.total >= 0.8 ? '🎉' : sessionResult.correct / sessionResult.total >= 0.5 ? '👍' : '💪'}
-        </div>
-        <div style={{ fontSize: 32, fontWeight: 700, marginBottom: 8 }}>
-          {sessionResult.correct} / {sessionResult.total}
-        </div>
-        <div style={{ color: 'var(--text-muted)', marginBottom: 32 }}>
-          答對率 {Math.round(sessionResult.correct / sessionResult.total * 100)}%
-        </div>
+        <div style={{ fontSize: 64, marginBottom: 16 }}>✅</div>
+        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>這輪複習完成！</div>
+        <div style={{ color: 'var(--text-muted)', marginBottom: 32 }}>共複習了 {queue.length} 張卡片</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 300, margin: '0 auto' }}>
-          <button className="btn btn-primary btn-full" onClick={restart}>再來一次</button>
+          <button className="btn btn-primary btn-full" onClick={restart}>再來一輪</button>
           <button className="btn btn-ghost btn-full" onClick={onBack}>回首頁</button>
         </div>
       </div>
@@ -117,13 +133,11 @@ export default function FlashCard({ user, onBack }) {
         <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>{idx + 1} / {queue.length}</span>
       </div>
 
-      {/* Progress bar */}
       <div style={{ height: 3, background: 'var(--border)' }}>
         <div style={{ height: '100%', background: 'var(--primary)', width: `${(idx / queue.length) * 100}%`, transition: 'width 0.3s' }} />
       </div>
 
       <div style={{ padding: '24px 16px' }}>
-        {/* Card */}
         <div
           onClick={() => setFlipped(f => !f)}
           style={{
@@ -155,21 +169,24 @@ export default function FlashCard({ user, onBack }) {
         </div>
 
         {flipped && (
-          <div style={{ display: 'flex', gap: 12 }}>
-            <button className="btn btn-error btn-full" style={{ padding: 16, fontSize: 16 }} onClick={() => handleAnswer(false)}>
-              ✗ 答錯
-            </button>
-            <button className="btn btn-success btn-full" style={{ padding: 16, fontSize: 16 }} onClick={() => handleAnswer(true)}>
-              ✓ 答對
-            </button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {LABELS.map(({ value, text, color }) => (
+              <button
+                key={value}
+                onClick={() => handleMark(value)}
+                style={{
+                  padding: '14px 16px', borderRadius: 12, border: `2px solid ${color}`,
+                  background: 'transparent', color, fontSize: 16, fontWeight: 600,
+                  cursor: 'pointer', transition: 'background 0.15s',
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = color + '18'}
+                onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+              >
+                {text}
+              </button>
+            ))}
           </div>
         )}
-
-        {/* Score */}
-        <div style={{ display: 'flex', justifyContent: 'center', gap: 24, marginTop: 20, fontSize: 14, color: 'var(--text-muted)' }}>
-          <span>✓ {correct}</span>
-          <span>✗ {wrong}</span>
-        </div>
       </div>
     </div>
   )
